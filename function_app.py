@@ -26,46 +26,58 @@ def convert_xlsm(req: func.HttpRequest) -> func.HttpResponse:
         if not file_url:
             return func.HttpResponse("Missing 'url' in request.", status_code=400)
 
-        # Download XLSM
-        response = requests.get(file_url)
-        if response.status_code != 200:
-            return func.HttpResponse(
-                f"Failed to download file. Status: {response.status_code}",
-                status_code=500
-            )
+        # Download file
+        try:
+            response = requests.get(file_url, timeout=30)
+            response.raise_for_status()
+        except Exception as e:
+            logging.exception("Failed to download XLSM")
+            return func.HttpResponse(f"Download error: {str(e)}", status_code=500)
 
-        # Save XLSM to temp file
+        # Save XLSM
         temp_xlsm = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsm")
         temp_xlsm.write(response.content)
         temp_xlsm.close()
 
         # Convert XLSM → XLSX
-        wb = load_workbook(temp_xlsm.name, data_only=True)
+        try:
+            wb = load_workbook(temp_xlsm.name, data_only=True)
+        except Exception as e:
+            logging.exception("openpyxl failed to load XLSM")
+            return func.HttpResponse(f"openpyxl error: {str(e)}", status_code=500)
+
         temp_xlsx = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
         wb.save(temp_xlsx.name)
 
-        # Upload XLSX to Blob
+        # Read environment settings
         conn_str = os.getenv("STORAGE_CONNECTION_STRING")
         account_name = os.getenv("STORAGE_ACCOUNT_NAME")
         account_key = os.getenv("STORAGE_ACCOUNT_KEY")
         container_name = os.getenv("CONVERTED_CONTAINER", "converted")
 
+        if not conn_str or not account_name or not account_key:
+            return func.HttpResponse(
+                "Server error: missing Azure storage settings.",
+                status_code=500
+            )
+
         blob_service = BlobServiceClient.from_connection_string(conn_str)
 
         import urllib.parse as up
         parsed = up.urlparse(file_url)
-        original = os.path.basename(parsed.path)
-        xlsx_name = original.replace(".xlsm", ".xlsx")
+        original_name = os.path.basename(parsed.path)
+        xlsx_name = original_name.replace(".xlsm", ".xlsx")
 
+        # Upload new XLSX
         blob_client = blob_service.get_blob_client(
             container=container_name,
             blob=xlsx_name
         )
 
-        with open(temp_xlsx.name, "rb") as data:
-            blob_client.upload_blob(data, overwrite=True)
+        with open(temp_xlsx.name, "rb") as f:
+            blob_client.upload_blob(f, overwrite=True)
 
-        # Generate SAS URL for XLSX
+        # SAS URL
         sas = generate_blob_sas(
             account_name=account_name,
             container_name=container_name,
@@ -80,16 +92,16 @@ def convert_xlsm(req: func.HttpRequest) -> func.HttpResponse:
             f"{container_name}/{xlsx_name}?{sas}"
         )
 
-        # Cleanup
+        # cleanup
         os.unlink(temp_xlsm.name)
         os.unlink(temp_xlsx.name)
 
         return func.HttpResponse(
             f'{{"status":"success","xlsx_url":"{xlsx_url}"}}',
-            status_code=200,
-            mimetype="application/json"
+            mimetype="application/json",
+            status_code=200
         )
 
     except Exception as e:
-        logging.exception("Conversion error")
+        logging.exception("Unhandled error")
         return func.HttpResponse(f"Error: {str(e)}", status_code=500)
