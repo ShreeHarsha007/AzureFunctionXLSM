@@ -8,116 +8,127 @@ from openpyxl import load_workbook
 from azure.storage.blob import BlobServiceClient, BlobSasPermissions, generate_blob_sas
 from datetime import datetime, timedelta, timezone
 
-# --- Configuration ---
-# Uses the connection string set in the Azure Function App's settings
-# Ensure this setting exists in your Function App configuration!
-STORAGE_CONN_STR = os.environ.get("AzureWebJobsStorage") 
-OUTPUT_CONTAINER_NAME = "xlsx-output" # Your target blob container name
+
+# =======================
+# CONFIGURATION
+# =======================
+STORAGE_CONN_STR = os.environ.get("AzureWebJobsStorage")
+OUTPUT_CONTAINER_NAME = "xlsx-output"   # MUST EXIST IN STORAGE
+
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
-    """
-    HTTP Trigger function to download an XLSM file via URL,
-    convert it to XLSX (extracting calculated values), upload it, 
-    and return a secure SAS download URL.
-    """
-    logging.info('XLSM Converter function processing request.')
+    logging.info('XLSM Converter function started.')
 
-    # ----------------------------------------------------
-    # CRITICAL: Debugging wrapper to catch startup errors
-    # ----------------------------------------------------
     try:
-        # 1. Parse Input URL from Request Body
+        # ------------------------------
+        # 1. Parse Request Body
+        # ------------------------------
         try:
             req_body = req.get_json()
             xlsm_url = req_body.get('xlsm_url')
-        except ValueError:
+        except:
             return func.HttpResponse(
-                 "Please pass a JSON payload with 'xlsm_url'",
-                 status_code=400
+                "Request must contain JSON body with 'xlsm_url'",
+                status_code=400
             )
 
         if not xlsm_url or not xlsm_url.lower().endswith(".xlsm"):
             return func.HttpResponse(
-                "Invalid or missing 'xlsm_url'. Must be a URL ending with .xlsm",
+                "Invalid or missing 'xlsm_url'. Must be a direct URL ending in .xlsm",
                 status_code=400
             )
 
-        # Define File Paths and Names
-        original_filename = xlsm_url.split('/')[-1]
-        file_name_without_ext = os.path.splitext(original_filename)[0]
-        output_blob_name = f"converted/{file_name_without_ext}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.xlsx"
-        
-        # 2. Download the XLSM file
-        logging.info(f"Downloading file from: {xlsm_url}")
-        
-        # Use io.BytesIO to keep files entirely in memory, avoiding local disk issues
-        r = requests.get(xlsm_url, allow_redirects=True)
-        r.raise_for_status() 
-        xlsm_in_memory = io.BytesIO(r.content)
-        
-        # 3. Convert XLSM to XLSX (The core logic)
-        logging.info("Starting conversion with openpyxl (data_only=True)...")
-        # Load workbook from memory, preserving calculated values only
-        wb = load_workbook(xlsm_in_memory, data_only=True)
-        
-        # Save the new XLSX file to a new memory buffer
-        xlsx_out_memory = io.BytesIO()
-        wb.save(xlsx_out_memory)
-        xlsx_out_memory.seek(0)
-        logging.info("Conversion successful and file saved to memory.")
+        logging.info(f"Downloading XLSM from: {xlsm_url}")
 
-        # 4. Upload the new XLSX file to Blob Storage
+        # ------------------------------
+        # 2. Download XLSM file
+        # ------------------------------
+        response = requests.get(xlsm_url, allow_redirects=True)
+        response.raise_for_status()
+
+        xlsm_bytes = io.BytesIO(response.content)
+
+        # ------------------------------
+        # 3. Convert XLSM → XLSX
+        # ------------------------------
+        logging.info("Converting file using openpyxl...")
+
+        wb = load_workbook(xlsm_bytes, data_only=True)
+
+        xlsx_buffer = io.BytesIO()
+        wb.save(xlsx_buffer)
+        xlsx_buffer.seek(0)
+
+        logging.info("Conversion successful.")
+
+        # ------------------------------
+        # 4. Upload XLSX to Blob Storage
+        # ------------------------------
         if not STORAGE_CONN_STR:
-             raise ValueError("AzureWebJobsStorage connection string is not set.")
+            raise ValueError("AzureWebJobsStorage is missing in App Settings.")
 
-        blob_service_client = BlobServiceClient.from_connection_string(STORAGE_CONN_STR)
-        blob_client = blob_service_client.get_blob_client(
-            container=OUTPUT_CONTAINER_NAME, 
-            blob=output_blob_name
+        blob_service = BlobServiceClient.from_connection_string(STORAGE_CONN_STR)
+
+        # Extract original name
+        file_name = os.path.basename(xlsm_url)
+        base_name = os.path.splitext(file_name)[0]
+
+        final_blob_name = f"converted/{base_name}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.xlsx"
+
+        blob_client = blob_service.get_blob_client(
+            container=OUTPUT_CONTAINER_NAME,
+            blob=final_blob_name
         )
-        
-        # Upload the file from the memory buffer
-        blob_client.upload_blob(xlsx_out_memory, overwrite=True) 
-        logging.info(f"Upload successful to blob: {output_blob_name}")
-        
-        # 5. Generate Secure SAS URL for download
-        # Note: Access to account_key is needed for generate_blob_sas
-        account_key = blob_service_client.credential.account_key
+
+        blob_client.upload_blob(xlsx_buffer, overwrite=True)
+        logging.info(f"Uploaded to blob: {final_blob_name}")
+
+        # ------------------------------
+        # 5. Generate SAS URL
+        # ------------------------------
+        # Extract AccountName + AccountKey from connection string
+        parts = {
+            kv.split('=')[0]: kv.split('=')[1]
+            for kv in STORAGE_CONN_STR.split(';')
+            if '=' in kv
+        }
+
+        account_name = parts.get("AccountName")
+        account_key = parts.get("AccountKey")
+
         if not account_key:
-             raise ValueError("Account key could not be retrieved from connection string.")
+            raise ValueError("AccountKey missing in AzureWebJobsStorage connection string.")
 
         sas_token = generate_blob_sas(
-            account_name=blob_service_client.account_name,
+            account_name=account_name,
             container_name=OUTPUT_CONTAINER_NAME,
-            blob_name=output_blob_name,
+            blob_name=final_blob_name,
             account_key=account_key,
             permission=BlobSasPermissions(read=True),
-            # Token expires after 60 minutes
-            expiry=datetime.now(timezone.utc) + timedelta(minutes=60) 
+            expiry=datetime.now(timezone.utc) + timedelta(hours=1)
         )
-                
-        output_url = f"{blob_client.url}?{sas_token}"
-        
-        # 6. Return the secured URL
+
+        download_url = f"https://{account_name}.blob.core.windows.net/{OUTPUT_CONTAINER_NAME}/{final_blob_name}?{sas_token}"
+
+        # ------------------------------
+        # 6. Return Response
+        # ------------------------------
         return func.HttpResponse(
-            json.dumps({"status": "success", "converted_url": output_url}),
+            json.dumps({"status": "success", "converted_url": download_url}),
             mimetype="application/json",
             status_code=200
         )
-        
+
     except requests.HTTPError as e:
-        logging.error(f"HTTP Error during download: {e}. Status code: {e.response.status_code}")
+        logging.error(f"HTTP error while downloading XLSM: {e}")
         return func.HttpResponse(
-             f"Download failed due to HTTP Error: {e.response.status_code}. Check XLSM URL/SAS token.",
-             status_code=400
+            f"Download failed: {e.response.status_code}. Check URL/SAS token.",
+            status_code=400
         )
+
     except Exception as e:
-        # --- CRITICAL: Log the full traceback for debugging ---
-        logging.error(f"Execution Failed: {e}")
-        logging.exception(e) 
-        # ------------------------------------------------------
-        
+        logging.exception(f"Function failed: {e}")
         return func.HttpResponse(
-             f"Internal conversion or storage error. See Application Insights logs for details. Error: {e}",
-             status_code=500
+            f"Internal error: {e}",
+            status_code=500
         )
