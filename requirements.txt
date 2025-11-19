@@ -1,4 +1,4 @@
-azure-functions
-requests
-openpyxl
-azure-storage-blob
+azure-functions==1.19.0
+azure-storage-blob==12.19.1
+openpyxl==3.1.2
+requests==2.31.0
