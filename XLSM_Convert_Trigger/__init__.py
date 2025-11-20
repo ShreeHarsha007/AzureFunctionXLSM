@@ -4,11 +4,15 @@ import os
 import requests
 import json
 import io
-from openpyxl import load_workbook
-from azure.storage.blob import BlobServiceClient, BlobSasPermissions, generate_blob_sas
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
+from openpyxl import load_workbook
+from azure.storage.blob import (
+    BlobServiceClient,
+    BlobSasPermissions,
+    generate_blob_sas
+)
 
 # =======================
 # CONFIGURATION
@@ -18,24 +22,24 @@ OUTPUT_CONTAINER_NAME = "xlsx-output"   # MUST EXIST IN STORAGE
 
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info('XLSM Converter function started.')
+    logging.info("XLSM Converter function started.")
 
     try:
-        # ------------------------------
-        # 1. Parse Request Body
-        # ------------------------------
+        # --------------------------------------------------
+        # 1. Parse JSON Body
+        # --------------------------------------------------
         try:
-            req_body = req.get_json()
-            xlsm_url = req_body.get('xlsm_url')
+            body = req.get_json()
+            xlsm_url = body.get("xlsm_url")
         except:
             return func.HttpResponse(
-                "Request must contain JSON body with 'xlsm_url'",
+                "Request must contain JSON with field 'xlsm_url'.",
                 status_code=400
             )
 
-        # Parse URL and validate extension
+        # Validate structure
         parsed = urlparse(xlsm_url or "")
-        path = parsed.path or ""
+        path = parsed.path
 
         if not xlsm_url or not path.lower().endswith(".xlsm"):
             return func.HttpResponse(
@@ -43,19 +47,19 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 status_code=400
             )
 
-        logging.info(f"Downloading XLSM from: {xlsm_url}")
+        logging.info(f"Downloading XLSM → {xlsm_url}")
 
-        # ------------------------------
+        # --------------------------------------------------
         # 2. Download XLSM file
-        # ------------------------------
+        # --------------------------------------------------
         response = requests.get(xlsm_url, allow_redirects=True)
         response.raise_for_status()
 
         xlsm_bytes = io.BytesIO(response.content)
 
-        # ------------------------------
+        # --------------------------------------------------
         # 3. Convert XLSM → XLSX
-        # ------------------------------
+        # --------------------------------------------------
         logging.info("Converting file using openpyxl...")
 
         wb = load_workbook(xlsm_bytes, data_only=True)
@@ -64,17 +68,17 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         wb.save(xlsx_buffer)
         xlsx_buffer.seek(0)
 
-        logging.info("Conversion successful.")
+        logging.info("Conversion successful!")
 
-        # ------------------------------
+        # --------------------------------------------------
         # 4. Upload XLSX to Blob Storage
-        # ------------------------------
+        # --------------------------------------------------
         if not STORAGE_CONN_STR:
-            raise ValueError("AzureWebJobsStorage is missing in App Settings.")
+            raise ValueError("AzureWebJobsStorage is missing in App Settings!")
 
         blob_service = BlobServiceClient.from_connection_string(STORAGE_CONN_STR)
 
-        # Extract original name (without SAS)
+        # Extract filename
         original_name = os.path.basename(path)
         base_name = os.path.splitext(original_name)[0]
 
@@ -86,17 +90,14 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         )
 
         blob_client.upload_blob(xlsx_buffer, overwrite=True)
+
         logging.info(f"Uploaded converted file: {final_blob_name}")
 
-        # ------------------------------
-        # 5. Generate SAS URL
-        # ------------------------------
-        parts = dict(kv.split('=') for kv in STORAGE_CONN_STR.split(';') if '=' in kv)
-        account_name = parts.get("AccountName")
-        account_key = parts.get("AccountKey")
-
-        if not account_key:
-            raise ValueError("AccountKey missing in AzureWebJobsStorage connection string.")
+        # --------------------------------------------------
+        # 5. Generate SAS URL (SAFE METHOD)
+        # --------------------------------------------------
+        account_name = blob_service.account_name
+        account_key = blob_service.credential.account_key
 
         sas_token = generate_blob_sas(
             account_name=account_name,
@@ -112,25 +113,28 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             f"{OUTPUT_CONTAINER_NAME}/{final_blob_name}?{sas_token}"
         )
 
-        # ------------------------------
-        # 6. Return Response
-        # ------------------------------
+        # --------------------------------------------------
+        # 6. Response
+        # --------------------------------------------------
         return func.HttpResponse(
-            json.dumps({"status": "success", "converted_url": download_url}),
+            json.dumps({
+                "status": "success",
+                "converted_url": download_url
+            }),
             mimetype="application/json",
             status_code=200
         )
 
     except requests.HTTPError as e:
-        logging.error(f"HTTP error while downloading XLSM: {e}")
+        logging.error(f"Download failed: {e}")
         return func.HttpResponse(
-            f"Download failed: {e.response.status_code}. Check URL/SAS token.",
+            f"Download error: {e.response.status_code}. Check your SAS token or file URL.",
             status_code=400
         )
 
     except Exception as e:
         logging.exception(f"Function failed: {e}")
         return func.HttpResponse(
-            f"Internal error: {e}",
+            f"Internal error: {str(e)}",
             status_code=500
         )
