@@ -14,20 +14,15 @@ from azure.storage.blob import (
     generate_blob_sas
 )
 
-# ======================================
-# CONFIGURATION
-# ======================================
+
 STORAGE_CONN_STR = os.environ.get("AzureWebJobsStorage")
-OUTPUT_CONTAINER_NAME = "xlsx-output"   # MUST EXIST IN STORAGE
+OUTPUT_CONTAINER_NAME = "xlsx-output"  
 
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
     logging.info("XLSM Converter function started.")
 
     try:
-        # --------------------------------------------------
-        # 1. Parse JSON Body
-        # --------------------------------------------------
         try:
             body = req.get_json()
             xlsm_url = body.get("xlsm_url")
@@ -49,17 +44,11 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
         logging.info(f"Downloading XLSM from URL: {xlsm_url}")
 
-        # --------------------------------------------------
-        # 2. Download XLSM file
-        # --------------------------------------------------
         response = requests.get(xlsm_url, allow_redirects=True)
         response.raise_for_status()
 
         xlsm_bytes = io.BytesIO(response.content)
 
-        # --------------------------------------------------
-        # 3. Convert XLSM → XLSX using openpyxl
-        # --------------------------------------------------
         logging.info("Converting XLSM to XLSX...")
 
         wb = load_workbook(xlsm_bytes, data_only=True)
@@ -70,15 +59,11 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
         logging.info("Conversion successful.")
 
-        # --------------------------------------------------
-        # 4. Upload XLSX to Blob Storage
-        # --------------------------------------------------
         if not STORAGE_CONN_STR:
             raise ValueError("AzureWebJobsStorage missing in Function App Settings.")
 
         blob_service = BlobServiceClient.from_connection_string(STORAGE_CONN_STR)
 
-        # Use decoded filename (handles %20, special chars)
         decoded_filename = unquote(os.path.basename(path))
         base_name = os.path.splitext(decoded_filename)[0]
 
@@ -95,9 +80,6 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
         logging.info(f"Uploaded XLSX → {final_blob_name}")
 
-        # --------------------------------------------------
-        # 5. Generate SAS URL (FIXED VERSION)
-        # --------------------------------------------------
         account_name = blob_service.account_name
         account_key = blob_service.credential.account_key
 
@@ -109,7 +91,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             permission=BlobSasPermissions(read=True),
             expiry=datetime.now(timezone.utc) + timedelta(hours=1),
             protocol="https",
-            version="2020-02-10"     # 🔥 CRITICAL FIX
+            version="2020-02-10"     
         )
 
         download_url = (
