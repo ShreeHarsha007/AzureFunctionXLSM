@@ -78,7 +78,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         original_name = os.path.basename(path)
         base_name = os.path.splitext(original_name)[0]
 
-        final_blob_name = f"converted/{base_name}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.xlsx"
+        final_blob_name = f"{base_name}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.xlsx"
 
         blob_client = blob_service.get_blob_client(
             container=OUTPUT_CONTAINER_NAME,
