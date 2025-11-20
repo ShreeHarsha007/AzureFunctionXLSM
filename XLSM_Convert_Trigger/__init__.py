@@ -7,6 +7,7 @@ import io
 from openpyxl import load_workbook
 from azure.storage.blob import BlobServiceClient, BlobSasPermissions, generate_blob_sas
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 
 # =======================
@@ -32,9 +33,13 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 status_code=400
             )
 
-        if not xlsm_url or not xlsm_url.lower().endswith(".xlsm"):
+        # Parse URL and validate extension
+        parsed = urlparse(xlsm_url or "")
+        path = parsed.path or ""
+
+        if not xlsm_url or not path.lower().endswith(".xlsm"):
             return func.HttpResponse(
-                "Invalid or missing 'xlsm_url'. Must be a direct URL ending in .xlsm",
+                "Invalid or missing 'xlsm_url'. Must point to a .xlsm file.",
                 status_code=400
             )
 
@@ -69,9 +74,9 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
         blob_service = BlobServiceClient.from_connection_string(STORAGE_CONN_STR)
 
-        # Extract original name
-        file_name = os.path.basename(xlsm_url)
-        base_name = os.path.splitext(file_name)[0]
+        # Extract original name (without SAS)
+        original_name = os.path.basename(path)
+        base_name = os.path.splitext(original_name)[0]
 
         final_blob_name = f"converted/{base_name}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.xlsx"
 
@@ -81,18 +86,12 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         )
 
         blob_client.upload_blob(xlsx_buffer, overwrite=True)
-        logging.info(f"Uploaded to blob: {final_blob_name}")
+        logging.info(f"Uploaded converted file: {final_blob_name}")
 
         # ------------------------------
         # 5. Generate SAS URL
         # ------------------------------
-        # Extract AccountName + AccountKey from connection string
-        parts = {
-            kv.split('=')[0]: kv.split('=')[1]
-            for kv in STORAGE_CONN_STR.split(';')
-            if '=' in kv
-        }
-
+        parts = dict(kv.split('=') for kv in STORAGE_CONN_STR.split(';') if '=' in kv)
         account_name = parts.get("AccountName")
         account_key = parts.get("AccountKey")
 
@@ -108,7 +107,10 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             expiry=datetime.now(timezone.utc) + timedelta(hours=1)
         )
 
-        download_url = f"https://{account_name}.blob.core.windows.net/{OUTPUT_CONTAINER_NAME}/{final_blob_name}?{sas_token}"
+        download_url = (
+            f"https://{account_name}.blob.core.windows.net/"
+            f"{OUTPUT_CONTAINER_NAME}/{final_blob_name}?{sas_token}"
+        )
 
         # ------------------------------
         # 6. Return Response
