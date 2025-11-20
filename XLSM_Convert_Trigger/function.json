@@ -1,19 +1,17 @@
 {
-  "scriptFile": "__init__.py",
   "bindings": [
     {
-      "authLevel": "function",
+      "name": "req",
       "type": "httpTrigger",
       "direction": "in",
-      "name": "req",
-      "methods": [
-        "post"
-      ]
+      "methods": [ "post" ],
+      "authLevel": "function",
+      "route": "XLSM_Convert_Trigger"
     },
     {
+      "name": "$return",
       "type": "http",
-      "direction": "out",
-      "name": "$return"
+      "direction": "out"
     }
   ]
 }
