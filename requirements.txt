@@ -1,5 +1,4 @@
 azure-functions
 azure-storage-blob==12.14.1
-cryptography==3.4.8
+azure-identity
 openpyxl==3.1.2
-requests
